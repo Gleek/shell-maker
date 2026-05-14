@@ -117,13 +117,16 @@ Return an alist with details of all overlays added:
                                         (map-elt table :end)))
                                 tables))
          (inline-codes (markdown-overlays--markdown-inline-codes
-                        (append source-block-ranges table-ranges)))
+                        source-block-ranges))
          (inline-code-ranges (seq-map (lambda (inline)
                                         (map-elt inline 'body))
                                       inline-codes))
+         ;; Tables are NOT in avoid-ranges so that bold/italic/link
+         ;; fontification runs inside table cells.  Table alignment
+         ;; uses display overlays on pipes and padding, keeping cell
+         ;; content visible and navigable.
          (avoid-ranges (append inline-code-ranges
-                               source-block-ranges
-                               table-ranges))
+                               source-block-ranges))
          (links (markdown-overlays--markdown-links avoid-ranges))
          (images (markdown-overlays--markdown-images avoid-ranges))
          (image-file-paths (markdown-overlays--image-file-paths avoid-ranges))

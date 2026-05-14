@@ -627,13 +627,14 @@ For WIDTH=5, return \"─────\"."
 ;;; Main Table Alignment
 
 (defun markdown-overlays--align-table (table)
-  "Apply display overlays to align TABLE columns.
-If `markdown-overlays--table-wrap-columns' is non-nil and table is too wide,
-columns are wrapped to fit within window width.
+  "Align TABLE columns using overlays that hide only markup.
+Pipe characters are hidden and replaced with unicode borders.
+Separator rows are fully replaced.  Content cells stay as visible,
+navigable buffer text with column padding via display properties.
 
-Before: | Name | Role |       After: │ Name  │ Role     │
-        |------|------|              ├───────┼──────────┤
-        | Alice | Engineer |        │ Alice │ Engineer │"
+Before: | Name | Role |       After: │ Name    │ Role     │
+        |------|------|              ├─────────┼──────────┤
+        | Alice | Engineer |        │ Alice   │ Engineer │"
   (let* ((preprocessed (markdown-overlays--preprocess-table table))
          (natural-widths (plist-get preprocessed :natural-widths))
          (min-widths (plist-get preprocessed :min-widths))
@@ -649,7 +650,10 @@ Before: | Name | Role |       After: │ Name  │ Role     │
                           natural-widths min-widths target-width)
                        natural-widths))
          (separator-row (map-elt table :separator-row))
-         (data-row-num 0))  ; Track data rows for zebra striping
+         (data-row-num 0)
+         (pipe-str (if markdown-overlays--table-use-unicode-borders
+                       markdown-overlays--table-border-pipe "|"))
+         (pipe-display (propertize pipe-str 'face markdown-overlays--table-border-face)))
 
     (dolist (row-entry processed-rows)
       (let* ((row (car row-entry))
@@ -664,19 +668,18 @@ Before: | Name | Role |       After: │ Name  │ Role     │
                             (not is-separator)
                             (= (mod data-row-num 2) 1))))
 
-        ;; Increment data row counter for non-header, non-separator rows
         (unless (or is-header is-separator)
           (setq data-row-num (1+ data-row-num)))
 
         (if is-separator
-            ;; Separator row
+            ;; Separator row — use display property to replace entire row.
+            ;; Cursor can land here but sees the unicode separator.
             (let* ((pipe (if markdown-overlays--table-use-unicode-borders
                              markdown-overlays--table-border-cross "|"))
                    (pipe-left (if markdown-overlays--table-use-unicode-borders
                                   markdown-overlays--table-border-tee-left "|"))
                    (pipe-right (if markdown-overlays--table-use-unicode-borders
                                    markdown-overlays--table-border-tee-right "|"))
-                   ;; Preserve leading whitespace
                    (leading-ws (save-excursion
                                  (goto-char row-start)
                                  (if (looking-at (rx line-start (* (any " \t"))))
@@ -693,122 +696,82 @@ Before: | Name | Role |       After: │ Name  │ Role     │
                       (propertize pipe 'face markdown-overlays--table-border-face))
                      (propertize pipe-right 'face markdown-overlays--table-border-face)))
                    (ov (make-overlay row-start row-end)))
-              ;; Use invisible+before-string so text properties in
-              ;; row-display (e.g. fractional-width spaces) are honoured.
               (let ((lp (get-text-property row-start 'line-prefix)))
                 (when lp
                   (put-text-property 0 (length row-display) 'line-prefix lp row-display)))
               (markdown-overlays--put ov
                                      'evaporate t
-                                     'invisible 'markdown-overlays-tables
-                                     'before-string row-display))
+                                     'display row-display))
 
-          ;; Content row — use pre-processed cell content
-          (let* ((ncols (length processed-cells))
-                 (wrapped-cells-vec
-                  (let ((idx 0)
-                        (vec (make-vector ncols nil)))
-                    (dolist (processed processed-cells)
-                      (aset vec idx
-                            (vconcat
-                             (markdown-overlays--table-wrap-text
-                              processed (or (nth idx col-widths) 10))))
-                      (setq idx (1+ idx)))
-                    vec))
-                 (col-widths-vec (vconcat col-widths))
-                 (max-lines (let ((m 0) (i 0))
-                                     (while (< i ncols)
-                                       (setq m (max m (length (aref wrapped-cells-vec i)))
-                                             i (1+ i)))
-                                     (max 1 m)))
-                 (pipe (if markdown-overlays--table-use-unicode-borders
-                           markdown-overlays--table-border-pipe "|"))
-                 (styled-pipe (propertize pipe 'face markdown-overlays--table-border-face))
-                 ;; Preserve leading whitespace
-                 (leading-ws (save-excursion
-                               (goto-char row-start)
-                               (if (looking-at (rx line-start (* (any " \t"))))
-                                   (match-string 0) "")))
-                 (face (cond
-                        (is-header markdown-overlays--table-header-face)
-                        (is-zebra markdown-overlays--table-zebra-face)
-                        (t markdown-overlays--table-row-face)))
-                 ;; Build multi-line display string for entire row
-                 (row-display
-                  (let ((lines nil))
-                    (dotimes (line-idx max-lines)
-                      (let ((parts nil))
-                        (dotimes (col-idx ncols)
-                          (let* ((cell-lines (aref wrapped-cells-vec col-idx))
-                                 (line (if (< line-idx (length cell-lines))
-                                           (aref cell-lines line-idx) ""))
-                                 (padded (concat " "
-                                                 (markdown-overlays--pad-string
-                                                  line (aref col-widths-vec col-idx))
-                                                 " ")))
-                            ;; Use add-face-text-property to preserve inline formatting
-                            (add-face-text-property 0 (length padded) face t padded)
-                            (push padded parts)))
-                        (push (concat leading-ws styled-pipe
-                                      (string-join (nreverse parts) styled-pipe)
-                                      styled-pipe)
-                              lines)))
-                    (mapconcat #'identity (nreverse lines) "\n")))
-                 ;; Create overlay for entire row (including pipes)
-                 (ov (make-overlay row-start row-end)))
-            ;; Use invisible+before-string so text properties in
-            ;; row-display (e.g. fractional-width spaces) are honoured.
-            ;; Propagate line-prefix so wrapped lines indent correctly
-            ;; even for the last row where buffer properties may differ.
-            (let ((lp (get-text-property row-start 'line-prefix)))
-              (when lp
-                (put-text-property 0 (length row-display) 'line-prefix lp row-display)))
-            (markdown-overlays--put ov
-                                   'evaporate t
-                                   'invisible 'markdown-overlays-tables
-                                   'before-string row-display)))))))
+          ;; Content row — hide pipes, pad cells, apply faces.
+          ;; Cell text stays visible and navigable.
+          (let ((cells (markdown-overlays--parse-table-row row-start row-end))
+                (col-idx 0)
+                (face (cond
+                       (is-header markdown-overlays--table-header-face)
+                       (is-zebra markdown-overlays--table-zebra-face)
+                       (t nil))))
+
+            ;; Replace leading pipe with unicode border.
+            ;; Only cover the single `|` character, not leading whitespace.
+            (save-excursion
+              (goto-char row-start)
+              (when (looking-at (rx (* (any " \t")) "|"))
+                (let* ((pipe-pos (1- (match-end 0)))
+                       (ov (make-overlay pipe-pos (1+ pipe-pos))))
+                  (markdown-overlays--put ov 'evaporate t
+                                         'display pipe-display))))
+
+            (dolist (cell cells)
+              (let* ((cell-start (map-elt cell :start))
+                     (cell-end (map-elt cell :end))
+                     (content (map-elt cell :content))
+                     (content-dw (markdown-overlays--table-display-width
+                                  (markdown-overlays--process-cell-content content)))
+                     (target-w (or (nth col-idx col-widths) content-dw))
+                     ;; Visual padding needed after markup is hidden.
+                     ;; After fontify-bold/link hide markup, the visible cell width
+                     ;; is approximately content-dw + surrounding spaces.
+                     ;; We need: target-w + 2 (cell padding) total visible width.
+                     ;; Currently visible: content-dw + 2 (surrounding spaces).
+                     ;; But hidden markup chars become invisible (zero visual width).
+                     ;; So padding = target-w - content-dw.
+                     (padding (max 0 (- target-w content-dw))))
+
+                ;; Apply zebra/header face per cell to avoid bleeding into pipes.
+                (when face
+                  (let ((ov (make-overlay cell-start cell-end)))
+                    (markdown-overlays--put ov 'evaporate t 'face face)))
+
+                ;; Pad the last character of the cell with a wider display space.
+                (when (and (> padding 0) (> cell-end cell-start))
+                  (let ((ov (make-overlay (1- cell-end) cell-end)))
+                    (markdown-overlays--put
+                     ov 'evaporate t
+                     'display `(space :width ,(+ 1 padding)))))
+
+                ;; Replace the pipe after this cell with unicode border.
+                (when (<= cell-end row-end)
+                  (let ((pipe-pos cell-end))
+                    (when (and (<= pipe-pos row-end)
+                               (char-equal (char-after pipe-pos) ?|))
+                      (let ((ov (make-overlay pipe-pos (1+ pipe-pos))))
+                        (markdown-overlays--put ov 'evaporate t
+                                               'display pipe-display)))))
+
+                (setq col-idx (1+ col-idx))))))))))
 
 (defun markdown-overlays--fontify-tables (tables)
   "Align all markdown TABLES using display overlays.
-Uses a content-based cache to skip reprocessing unchanged tables."
+Hides pipe characters with unicode borders and pads cells for alignment.
+Content text stays visible and navigable."
   (when-let (((and markdown-overlays-prettify-tables tables))
              (new-cache (make-hash-table :test 'equal)))
-    (unless (memq 'markdown-overlays-tables
-                  (if (listp buffer-invisibility-spec)
-                      buffer-invisibility-spec))
-      (add-to-invisibility-spec 'markdown-overlays-tables))
     (dolist (table tables)
       (let ((key (buffer-substring-no-properties (map-elt table :start)
                                                  (map-elt table :end))))
-        (if-let* ((cached (map-elt markdown-overlays--table-cache key)))
-            ;; Table unchanged, re-apply cached overlays.
-            (progn
-              (dolist (entry cached)
-                (let* ((before-string (map-elt entry :before-string))
-                       (line-prefix (map-elt entry :line-prefix))
-                       (ov (make-overlay (map-elt entry :start) (map-elt entry :end))))
-                  (when line-prefix
-                    (put-text-property 0 (length before-string) 'line-prefix line-prefix before-string))
-                  (markdown-overlays--put
-                   ov
-                   'evaporate t
-                   'invisible 'markdown-overlays-tables
-                   'before-string before-string)))
-              (map-put! new-cache key cached))
-          ;; Table is new or changed, full processing.
-          (markdown-overlays--align-table table)
-          ;; Collect the overlays created for this table region.
-          (let ((entries nil))
-            (dolist (ov (overlays-in (map-elt table :start) (map-elt table :end)))
-              (when (eq (overlay-get ov 'invisible) 'markdown-overlays-tables)
-                (push `((:start . ,(overlay-start ov))
-                        (:end . ,(overlay-end ov))
-                        (:before-string . ,(copy-sequence (overlay-get ov 'before-string)))
-                        (:line-prefix . ,(get-text-property 0 'line-prefix
-                                                            (overlay-get ov 'before-string))))
-                      entries)))
-            (map-put! new-cache key entries)))))
-    ;; Replace old cache — entries for deleted tables are dropped.
+        ;; Always reprocess — overlay-only approach is cheap.
+        (markdown-overlays--align-table table)))
     (setq markdown-overlays--table-cache new-cache)))
 
 
